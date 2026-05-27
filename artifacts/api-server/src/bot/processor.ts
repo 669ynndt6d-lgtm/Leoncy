@@ -1,24 +1,19 @@
-import { Bot, InputFile } from "grammy";
+import { Bot, InlineKeyboard } from "grammy";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "./db.js";
 import {
-  createTextTo3DPreview,
-  createTextTo3DRefine,
+  createTextTo3D,
   createImageTo3D,
-  getTask,
-  getImageTask,
-  qualityToMeshy,
-} from "./meshy.js";
+  getRequest,
+  extractGlbUrl,
+  extractThumbnailUrl,
+} from "./genapi.js";
 import { downloadFile } from "./storage.js";
-import {
-  cancelGenerationKeyboard,
-  downloadKeyboard,
-} from "./keyboards.js";
+import { cancelGenerationKeyboard, downloadKeyboard } from "./keyboards.js";
 import { generationStatusText } from "./messages.js";
 import { logger } from "../lib/logger.js";
-import path from "node:path";
 
-const POLL_INTERVAL = 5000;
+const POLL_INTERVAL = 6000;
 
 export async function startTextGeneration(
   bot: Bot,
@@ -29,65 +24,27 @@ export async function startTextGeneration(
   quality: string,
 ) {
   const db = getDb();
-
   try {
-    // Step 1: Create preview task
     await bot.api.editMessageText(
       chatId,
       statusMsgId,
-      `🔄 <b>Создание превью…</b>\n\n${generationStatusText("processing", 5, quality)}`,
-      {
-        parse_mode: "HTML",
-        reply_markup: cancelGenerationKeyboard(generationId),
-      },
+      `🔄 <b>Запуск генерации…</b>\n\n${generationStatusText("processing", 5, quality)}`,
+      { parse_mode: "HTML", reply_markup: cancelGenerationKeyboard(generationId) },
     );
 
-    const previewTaskId = await createTextTo3DPreview(prompt);
+    const requestId = await createTextTo3D(prompt);
     await db
       .update(schema.generationsTable)
-      .set({ meshyTaskId: previewTaskId, status: "processing", progress: 5 })
+      .set({ meshyTaskId: requestId, status: "processing", progress: 5 })
       .where(eq(schema.generationsTable.id, generationId));
 
-    // Poll until preview complete
-    const previewTask = await pollTask(
-      bot, chatId, statusMsgId, generationId, previewTaskId, quality, "text", 5, 45,
-    );
-    if (!previewTask) return;
+    const result = await pollRequest(bot, chatId, statusMsgId, generationId, requestId, quality);
+    if (!result) return;
 
-    const thumbnailUrl = previewTask.thumbnail_url;
-    if (thumbnailUrl) {
-      await db
-        .update(schema.generationsTable)
-        .set({ thumbnailUrl, progress: 45 })
-        .where(eq(schema.generationsTable.id, generationId));
-    }
-
-    // Step 2: Refine task
-    await bot.api.editMessageText(
-      chatId,
-      statusMsgId,
-      `✨ <b>Оптимизация сетки…</b>\n\n${generationStatusText("processing", 50, quality)}`,
-      {
-        parse_mode: "HTML",
-        reply_markup: cancelGenerationKeyboard(generationId),
-      },
-    );
-
-    const refineTaskId = await createTextTo3DRefine(previewTaskId, qualityToMeshy(quality));
-    await db
-      .update(schema.generationsTable)
-      .set({ meshyTaskId: refineTaskId, progress: 50 })
-      .where(eq(schema.generationsTable.id, generationId));
-
-    const refineTask = await pollTask(
-      bot, chatId, statusMsgId, generationId, refineTaskId, quality, "text", 50, 95,
-    );
-    if (!refineTask) return;
-
-    await finalizeGeneration(bot, chatId, statusMsgId, generationId, refineTask, quality);
+    await finalizeGeneration(bot, chatId, statusMsgId, generationId, result, prompt, quality);
   } catch (err) {
     logger.error({ err, generationId }, "Text generation failed");
-    await handleGenerationError(bot, chatId, statusMsgId, generationId, String(err));
+    await handleError(bot, chatId, statusMsgId, generationId, err);
   }
 }
 
@@ -100,74 +57,70 @@ export async function startImageGeneration(
   quality: string,
 ) {
   const db = getDb();
-
   try {
     await bot.api.editMessageText(
       chatId,
       statusMsgId,
       `🔄 <b>Анализ изображения…</b>\n\n${generationStatusText("processing", 5, quality)}`,
-      {
-        parse_mode: "HTML",
-        reply_markup: cancelGenerationKeyboard(generationId),
-      },
+      { parse_mode: "HTML", reply_markup: cancelGenerationKeyboard(generationId) },
     );
 
-    const taskId = await createImageTo3D(imageUrl, qualityToMeshy(quality));
+    const requestId = await createImageTo3D(imageUrl);
     await db
       .update(schema.generationsTable)
-      .set({ meshyTaskId: taskId, status: "processing", progress: 5 })
+      .set({ meshyTaskId: requestId, status: "processing", progress: 5 })
       .where(eq(schema.generationsTable.id, generationId));
 
-    const task = await pollTask(
-      bot, chatId, statusMsgId, generationId, taskId, quality, "image", 5, 95,
-    );
-    if (!task) return;
+    const result = await pollRequest(bot, chatId, statusMsgId, generationId, requestId, quality);
+    if (!result) return;
 
-    await finalizeGeneration(bot, chatId, statusMsgId, generationId, task, quality);
+    await finalizeGeneration(bot, chatId, statusMsgId, generationId, result, "Из фото", quality);
   } catch (err) {
     logger.error({ err, generationId }, "Image generation failed");
-    await handleGenerationError(bot, chatId, statusMsgId, generationId, String(err));
+    await handleError(bot, chatId, statusMsgId, generationId, err);
   }
 }
 
-async function pollTask(
+async function pollRequest(
   bot: Bot,
   chatId: number,
   statusMsgId: number,
   generationId: number,
-  taskId: string,
+  requestId: string,
   quality: string,
-  type: "text" | "image",
-  progressStart: number,
-  progressEnd: number,
 ) {
   const db = getDb();
+  let lastProgress = 5;
 
   while (true) {
-    // Check if cancelled
     const [gen] = await db
       .select()
       .from(schema.generationsTable)
       .where(eq(schema.generationsTable.id, generationId));
 
-    if (!gen || gen.status === "cancelled") {
-      return null;
+    if (!gen || gen.status === "cancelled") return null;
+
+    const req = await getRequest(requestId);
+    logger.info({ requestId, status: req.status, progress: req.progress }, "Poll");
+
+    if (req.status === "completed") {
+      return req;
     }
 
-    const task = type === "image" ? await getImageTask(taskId) : await getTask(taskId);
-
-    if (task.status === "SUCCEEDED") {
-      return task;
+    if (req.status === "failed" || req.status === "error") {
+      throw new Error(req.error ?? "Generation failed");
     }
 
-    if (task.status === "FAILED" || task.status === "EXPIRED") {
-      throw new Error(task.task_error?.message ?? "Task failed");
+    // Map progress: queued=5..10, processing=10..90
+    let mappedProgress = lastProgress;
+    if (req.status === "queued") {
+      mappedProgress = Math.min(lastProgress + 2, 15);
+    } else if (req.status === "processing") {
+      const raw = typeof req.progress === "number" ? req.progress : 0;
+      mappedProgress = Math.round(15 + (raw / 100) * 75);
     }
-
-    const rawProgress = task.progress ?? 0;
-    const mappedProgress = Math.round(
-      progressStart + (rawProgress / 100) * (progressEnd - progressStart),
-    );
+    mappedProgress = Math.max(mappedProgress, lastProgress);
+    lastProgress = mappedProgress;
 
     await db
       .update(schema.generationsTable)
@@ -178,14 +131,11 @@ async function pollTask(
       await bot.api.editMessageText(
         chatId,
         statusMsgId,
-        `⚙️ <b>Генерация модели…</b>\n\n${generationStatusText("processing", mappedProgress, quality)}`,
-        {
-          parse_mode: "HTML",
-          reply_markup: cancelGenerationKeyboard(generationId),
-        },
+        `⚙️ <b>Генерация 3D-модели…</b>\n\n${generationStatusText("processing", mappedProgress, quality)}`,
+        { parse_mode: "HTML", reply_markup: cancelGenerationKeyboard(generationId) },
       );
     } catch {
-      // message not modified — ok
+      // message unchanged — ok
     }
 
     await sleep(POLL_INTERVAL);
@@ -197,35 +147,32 @@ async function finalizeGeneration(
   chatId: number,
   statusMsgId: number,
   generationId: number,
-  task: Awaited<ReturnType<typeof getTask>>,
+  req: Awaited<ReturnType<typeof getRequest>>,
+  prompt: string,
   quality: string,
 ) {
   const db = getDb();
 
+  const output = req.output ?? {};
+  const glbUrl = extractGlbUrl(output);
+  const thumbnailUrl = extractThumbnailUrl(output);
+
+  logger.info({ generationId, glbUrl, thumbnailUrl, output }, "Generation completed");
+
   await bot.api.editMessageText(
     chatId,
     statusMsgId,
-    `📦 <b>Подготовка файлов…</b>\n\n${generationStatusText("processing", 95, quality)}`,
-    {
-      parse_mode: "HTML",
-      reply_markup: cancelGenerationKeyboard(generationId),
-    },
+    `📦 <b>Скачивание файлов…</b>\n\n${generationStatusText("processing", 95, quality)}`,
+    { parse_mode: "HTML", reply_markup: cancelGenerationKeyboard(generationId) },
   );
 
-  // Download available model files
-  const glbUrl = task.model_urls?.glb;
-  const objUrl = task.model_urls?.obj;
-  const thumbUrl = task.thumbnail_url;
-
   let localGlbPath: string | undefined;
-  let localObjPath: string | undefined;
-  let thumbnailUrl: string | undefined = thumbUrl;
-
   if (glbUrl) {
-    localGlbPath = await downloadFile(glbUrl, `gen_${generationId}.glb`);
-  }
-  if (objUrl) {
-    localObjPath = await downloadFile(objUrl, `gen_${generationId}.obj`);
+    try {
+      localGlbPath = await downloadFile(glbUrl, `gen_${generationId}.glb`);
+    } catch (err) {
+      logger.warn({ err }, "Failed to download GLB, will use remote URL");
+    }
   }
 
   await db
@@ -234,21 +181,38 @@ async function finalizeGeneration(
       status: "completed",
       progress: 100,
       modelUrlGlb: glbUrl,
-      modelUrlObj: objUrl,
       localGlbPath,
-      localObjPath,
       thumbnailUrl,
     })
     .where(eq(schema.generationsTable.id, generationId));
 
-  // Send completion message
+  // Increment usage counter
+  const [gen] = await db
+    .select()
+    .from(schema.generationsTable)
+    .where(eq(schema.generationsTable.id, generationId));
+  if (gen) {
+    await db
+      .update(schema.usersTable)
+      .set({
+        generationsUsed: db.$count(schema.generationsTable) as unknown as number,
+      })
+      .where(eq(schema.usersTable.telegramId, gen.telegramId));
+  }
+
+  // Build viewer WebApp URL
+  const domain = process.env.REPLIT_DOMAINS?.split(",")[0];
+  const viewerUrl = domain && glbUrl
+    ? `https://${domain}/viewer/?model=${encodeURIComponent(glbUrl)}&title=${encodeURIComponent(prompt.slice(0, 60))}&id=${generationId}`
+    : null;
+
   await bot.api.editMessageText(
     chatId,
     statusMsgId,
-    `✅ <b>3D-модель готова!</b>\n\n🎉 Генерация завершена успешно.\nФорматы: GLB, OBJ`,
+    `✅ <b>3D-модель готова!</b>\n\n🎉 Генерация завершена успешно.\n📁 Формат: GLB\n\n${viewerUrl ? "Нажмите «👁 Просмотр» для интерактивного вращения модели" : ""}`,
     {
       parse_mode: "HTML",
-      reply_markup: downloadKeyboard(generationId),
+      reply_markup: buildResultKeyboard(generationId, viewerUrl),
     },
   );
 
@@ -256,37 +220,47 @@ async function finalizeGeneration(
   if (thumbnailUrl) {
     try {
       await bot.api.sendPhoto(chatId, thumbnailUrl, {
-        caption: "🖼 Превью вашей 3D-модели",
+        caption: `🖼 Превью: <i>${prompt.slice(0, 80)}</i>`,
+        parse_mode: "HTML",
       });
     } catch {
-      // thumbnail send failure is non-critical
+      // non-critical
     }
   }
 }
 
-async function handleGenerationError(
+function buildResultKeyboard(generationId: number, viewerUrl: string | null) {
+  const kb = new InlineKeyboard();
+  if (viewerUrl) {
+    kb.webApp("👁 Просмотр 3D", viewerUrl);
+    kb.row();
+  }
+  kb.text("⬇ Скачать GLB", `download_glb_${generationId}`);
+  kb.text("◀ Меню", "menu_back");
+  return kb;
+}
+
+async function handleError(
   bot: Bot,
   chatId: number,
   statusMsgId: number,
   generationId: number,
-  errorMsg: string,
+  err: unknown,
 ) {
   const db = getDb();
+  const msg = err instanceof Error ? err.message : String(err);
   await db
     .update(schema.generationsTable)
-    .set({ status: "failed", errorMessage: errorMsg })
+    .set({ status: "failed", errorMessage: msg.slice(0, 500) })
     .where(eq(schema.generationsTable.id, generationId));
-
   try {
     await bot.api.editMessageText(
       chatId,
       statusMsgId,
-      `❌ <b>Ошибка генерации</b>\n\nК сожалению, произошла ошибка. Попробуйте снова.\n\n<i>${errorMsg.slice(0, 200)}</i>`,
+      `❌ <b>Ошибка генерации</b>\n\nПопробуйте снова.\n\n<i>${msg.slice(0, 200)}</i>`,
       { parse_mode: "HTML" },
     );
-  } catch {
-    // ignore
-  }
+  } catch { /* ignore */ }
 }
 
 function sleep(ms: number) {
