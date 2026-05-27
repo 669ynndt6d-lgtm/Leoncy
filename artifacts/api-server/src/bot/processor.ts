@@ -73,7 +73,11 @@ export async function startTextGeneration(
     await editStatus(bot, chatId, statusMsgId, generationId,
       `🏗 <b>Создание 3D-модели…</b>\n\n${generationStatusText("processing", 20, quality)}`);
 
-    const requestId = await createHunyuan3D(imageUrl);
+    const requestId = await createHunyuan3D(imageUrl, 5, async (attempt, delayMs) => {
+      const secs = Math.round(delayMs / 1000);
+      await editStatus(bot, chatId, statusMsgId, generationId,
+        `⏳ <b>Сервис перегружен, повторяем попытку ${attempt}/5…</b>\n\nПодождите ${secs} сек.`);
+    });
     await db.update(schema.generationsTable)
       .set({ meshyTaskId: requestId, progress: 20 })
       .where(eq(schema.generationsTable.id, generationId));
@@ -112,7 +116,11 @@ export async function startImageGeneration(
     await editStatus(bot, chatId, statusMsgId, generationId,
       `🏗 <b>Создание 3D-модели…</b>\n\n${generationStatusText("processing", 15, quality)}`);
 
-    const requestId = await createHunyuan3D(imageUrl);
+    const requestId = await createHunyuan3D(imageUrl, 5, async (attempt, delayMs) => {
+      const secs = Math.round(delayMs / 1000);
+      await editStatus(bot, chatId, statusMsgId, generationId,
+        `⏳ <b>Сервис перегружен, повторяем попытку ${attempt}/5…</b>\n\nПодождите ${secs} сек.`);
+    });
     await db.update(schema.generationsTable)
       .set({ meshyTaskId: requestId, progress: 15 })
       .where(eq(schema.generationsTable.id, generationId));

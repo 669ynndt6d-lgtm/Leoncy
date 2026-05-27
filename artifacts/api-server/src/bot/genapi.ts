@@ -32,13 +32,33 @@ export function pollinationsImageUrl(prompt: string, seed = 42): string {
 }
 
 // Submit an image URL to Hunyuan 3D — returns GenAPI request ID
-export async function createHunyuan3D(imageUrl: string): Promise<string> {
-  const res = await axios.post<{ id: string }>(
-    `${GENAPI_BASE}/networks/hunyuan-3d`,
-    { input_image_url: imageUrl },
-    { headers: headers() },
-  );
-  return res.data.id;
+// Retries up to maxRetries times on 503 (service temporarily unavailable)
+export async function createHunyuan3D(
+  imageUrl: string,
+  maxRetries = 5,
+  onRetry?: (attempt: number, delayMs: number) => void,
+): Promise<string> {
+  let lastErr: unknown;
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    try {
+      const res = await axios.post<{ id: string }>(
+        `${GENAPI_BASE}/networks/hunyuan-3d`,
+        { input_image_url: imageUrl },
+        { headers: headers() },
+      );
+      return res.data.id;
+    } catch (err: unknown) {
+      lastErr = err;
+      const status = (err as { response?: { status?: number } })?.response?.status;
+      // Only retry on 503 or network errors
+      if (status !== 503 && status !== undefined) throw err;
+      if (attempt === maxRetries) break;
+      const delayMs = 15_000 * attempt; // 15s, 30s, 45s, 60s …
+      onRetry?.(attempt, delayMs);
+      await new Promise(r => setTimeout(r, delayMs));
+    }
+  }
+  throw lastErr;
 }
 
 // Poll any GenAPI request by ID
