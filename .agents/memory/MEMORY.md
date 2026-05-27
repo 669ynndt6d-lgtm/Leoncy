@@ -1,0 +1,3 @@
+- [grammY esbuild externalize](grammy-esbuild.md) — grammy must be in the external list in build.mjs or platform.node fails at runtime
+- [Meshy two-stage pipeline](meshy-pipeline.md) — text-to-3D requires preview task first, then refine task with the preview ID
+- [drizzle-zod v4 omit](drizzle-zod-omit.md) — createInsertSchema omit() does not accept 'id' in zod/v4; use plain createInsertSchema without omit
