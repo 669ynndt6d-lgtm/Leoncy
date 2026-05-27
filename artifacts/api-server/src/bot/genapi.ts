@@ -35,7 +35,7 @@ export function pollinationsImageUrl(prompt: string, seed = 42): string {
 export async function createHunyuan3D(imageUrl: string): Promise<string> {
   const res = await axios.post<{ id: string }>(
     `${GENAPI_BASE}/networks/hunyuan-3d`,
-    { input: { input_image_url: imageUrl } },
+    { input: { image_url: imageUrl } },
     { headers: headers() },
   );
   return res.data.id;
