@@ -2,21 +2,33 @@ import { Bot, InlineKeyboard } from "grammy";
 import { eq } from "drizzle-orm";
 import { getDb, schema } from "./db.js";
 import {
-  generateImageFromText,
+  pollinationsImageUrl,
   createHunyuan3D,
   getRequest,
-  extractImageUrl,
   extractGlbUrl,
   extractThumbnailUrl,
 } from "./genapi.js";
-import { downloadFile } from "./storage.js";
+import { downloadFile, getUploadsDir } from "./storage.js";
 import { cancelGenerationKeyboard } from "./keyboards.js";
 import { generationStatusText } from "./messages.js";
 import { logger } from "../lib/logger.js";
+import path from "node:path";
 
 const POLL_INTERVAL = 5000;
 
-// TEXT → 3D: step 1 generate image, step 2 generate 3D
+function publicBaseUrl(): string {
+  const domain = process.env.REPLIT_DOMAINS?.split(",")[0];
+  return domain ? `https://${domain}` : `http://localhost:${process.env.PORT ?? 8080}`;
+}
+
+// Download any image URL to local uploads and return public URL
+async function localiseImage(srcUrl: string, filename: string): Promise<string> {
+  const localPath = await downloadFile(srcUrl, filename);
+  const rel = path.basename(localPath);
+  return `${publicBaseUrl()}/uploads/${rel}`;
+}
+
+// TEXT → 3D pipeline
 export async function startTextGeneration(
   bot: Bot,
   chatId: number,
@@ -27,26 +39,29 @@ export async function startTextGeneration(
 ) {
   const db = getDb();
   try {
-    // Phase 1: text → image
+    // Step 1: Generate preview image via Pollinations (free, no auth)
     await editStatus(bot, chatId, statusMsgId, generationId,
       `🎨 <b>Генерация превью изображения…</b>\n\n${generationStatusText("processing", 5, quality)}`);
 
-    const imgRequestId = await generateImageFromText(prompt);
+    const pollinationsUrl = pollinationsImageUrl(
+      `${prompt}, 3D render style, white background, centered, product photo`,
+      Math.floor(Math.random() * 9999),
+    );
+
+    let imageUrl: string;
+    try {
+      imageUrl = await localiseImage(pollinationsUrl, `preview_${generationId}.jpg`);
+    } catch (err) {
+      // Fallback: use the Pollinations URL directly
+      logger.warn({ err }, "Could not localise Pollinations image, using URL directly");
+      imageUrl = pollinationsUrl;
+    }
+
     await db.update(schema.generationsTable)
-      .set({ meshyTaskId: imgRequestId, status: "processing", progress: 5 })
+      .set({ previewImageUrl: imageUrl, status: "processing", progress: 15 })
       .where(eq(schema.generationsTable.id, generationId));
 
-    const imgResult = await pollUntilDone(bot, chatId, statusMsgId, generationId, imgRequestId, quality, 5, 30);
-    if (!imgResult) return;
-
-    const imageUrl = extractImageUrl(imgResult.output);
-    if (!imageUrl) throw new Error("Не удалось получить изображение от API");
-
-    await db.update(schema.generationsTable)
-      .set({ previewImageUrl: imageUrl, progress: 30 })
-      .where(eq(schema.generationsTable.id, generationId));
-
-    // Send preview image to user
+    // Send preview to user
     try {
       await bot.api.sendPhoto(chatId, imageUrl, {
         caption: `🎨 Превью: <i>${prompt.slice(0, 80)}</i>\n⏳ Генерирую 3D-модель…`,
@@ -54,48 +69,58 @@ export async function startTextGeneration(
       });
     } catch { /* non-critical */ }
 
-    // Phase 2: image → 3D
+    // Step 2: Hunyuan 3D
     await editStatus(bot, chatId, statusMsgId, generationId,
-      `🏗 <b>Создание 3D-модели…</b>\n\n${generationStatusText("processing", 35, quality)}`);
+      `🏗 <b>Создание 3D-модели…</b>\n\n${generationStatusText("processing", 20, quality)}`);
 
-    const modelRequestId = await createHunyuan3D(imageUrl);
+    const requestId = await createHunyuan3D(imageUrl);
     await db.update(schema.generationsTable)
-      .set({ meshyTaskId: modelRequestId, progress: 35 })
+      .set({ meshyTaskId: requestId, progress: 20 })
       .where(eq(schema.generationsTable.id, generationId));
 
-    const modelResult = await pollUntilDone(bot, chatId, statusMsgId, generationId, modelRequestId, quality, 35, 95);
-    if (!modelResult) return;
+    const result = await pollUntilDone(bot, chatId, statusMsgId, generationId, requestId, quality, 20, 95);
+    if (!result) return;
 
-    await finalizeGeneration(bot, chatId, statusMsgId, generationId, modelResult, imageUrl, prompt, quality);
+    await finalizeGeneration(bot, chatId, statusMsgId, generationId, result, imageUrl, prompt);
   } catch (err) {
     logger.error({ err, generationId }, "Text generation failed");
     await handleError(bot, chatId, statusMsgId, generationId, err);
   }
 }
 
-// IMAGE → 3D: directly pass image to Hunyuan 3D
+// IMAGE → 3D pipeline
 export async function startImageGeneration(
   bot: Bot,
   chatId: number,
   statusMsgId: number,
   generationId: number,
-  imageUrl: string,
+  telegramFileUrl: string,
   quality: string,
 ) {
   const db = getDb();
   try {
     await editStatus(bot, chatId, statusMsgId, generationId,
-      `🔄 <b>Анализ изображения…</b>\n\n${generationStatusText("processing", 5, quality)}`);
+      `📥 <b>Загрузка фото…</b>\n\n${generationStatusText("processing", 5, quality)}`);
+
+    // Download Telegram photo locally so GenAPI can reach it
+    const imageUrl = await localiseImage(telegramFileUrl, `photo_${generationId}.jpg`);
+
+    await db.update(schema.generationsTable)
+      .set({ previewImageUrl: imageUrl, status: "processing", progress: 10 })
+      .where(eq(schema.generationsTable.id, generationId));
+
+    await editStatus(bot, chatId, statusMsgId, generationId,
+      `🏗 <b>Создание 3D-модели…</b>\n\n${generationStatusText("processing", 15, quality)}`);
 
     const requestId = await createHunyuan3D(imageUrl);
     await db.update(schema.generationsTable)
-      .set({ meshyTaskId: requestId, status: "processing", progress: 5 })
+      .set({ meshyTaskId: requestId, progress: 15 })
       .where(eq(schema.generationsTable.id, generationId));
 
-    const result = await pollUntilDone(bot, chatId, statusMsgId, generationId, requestId, quality, 5, 95);
+    const result = await pollUntilDone(bot, chatId, statusMsgId, generationId, requestId, quality, 15, 95);
     if (!result) return;
 
-    await finalizeGeneration(bot, chatId, statusMsgId, generationId, result, imageUrl, "Из фото", quality);
+    await finalizeGeneration(bot, chatId, statusMsgId, generationId, result, imageUrl, "Из фото");
   } catch (err) {
     logger.error({ err, generationId }, "Image generation failed");
     await handleError(bot, chatId, statusMsgId, generationId, err);
@@ -154,14 +179,13 @@ async function finalizeGeneration(
   req: Awaited<ReturnType<typeof getRequest>>,
   previewImageUrl: string,
   prompt: string,
-  quality: string,
 ) {
   const db = getDb();
 
   const glbUrl = extractGlbUrl(req.output);
   const thumbnailUrl = extractThumbnailUrl(req.output) ?? previewImageUrl;
 
-  logger.info({ generationId, glbUrl, output: req.output }, "Generation completed");
+  logger.info({ generationId, glbUrl, rawOutput: JSON.stringify(req.output) }, "Generation completed");
 
   let localGlbPath: string | undefined;
   if (glbUrl) {

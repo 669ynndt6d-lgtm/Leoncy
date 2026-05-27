@@ -25,48 +25,23 @@ export interface GenApiRequest {
   progress?: number;
 }
 
-// Step 1 for text-to-3D: generate a 2D image from text using Flux
-export async function generateImageFromText(prompt: string): Promise<string> {
-  const res = await axios.post<{ id: string; status: string }>(
-    `${GENAPI_BASE}/networks/flux-1-schnell`,
-    {
-      input: {
-        prompt: `${prompt}, high quality, white background, centered, 3D product render style`,
-        width: 1024,
-        height: 1024,
-        num_inference_steps: 4,
-        guidance_scale: 3.5,
-      },
-    },
-    { headers: headers() },
-  );
-  return res.data.id;
+// Build a Pollinations.ai image URL from text (synchronous — downloads the image)
+export function pollinationsImageUrl(prompt: string, seed = 42): string {
+  const encoded = encodeURIComponent(prompt);
+  return `https://image.pollinations.ai/prompt/${encoded}?width=1024&height=1024&nologo=true&seed=${seed}`;
 }
 
-// Step 2 for text-to-3D (and only step for image-to-3D): Hunyuan 3D
+// Submit an image URL to Hunyuan 3D — returns GenAPI request ID
 export async function createHunyuan3D(imageUrl: string): Promise<string> {
-  const res = await axios.post<{ id: string; status: string }>(
+  const res = await axios.post<{ id: string }>(
     `${GENAPI_BASE}/networks/hunyuan-3d`,
-    {
-      input: {
-        input_image_url: imageUrl,
-        steps: 50,
-        octree_resolution: 256,
-        num_chunks: 8000,
-        randomize_seed: true,
-        seed: 0,
-        remove_background: true,
-        foreground_ratio: 0.85,
-        mc_algo: "mc",
-        export_format: "glb",
-      },
-    },
+    { input: { input_image_url: imageUrl } },
     { headers: headers() },
   );
   return res.data.id;
 }
 
-// Poll any GenAPI request
+// Poll any GenAPI request by ID
 export async function getRequest(requestId: string): Promise<GenApiRequest> {
   const res = await axios.get<GenApiRequest>(
     `${GENAPI_BASE}/requests/${requestId}`,
@@ -75,8 +50,8 @@ export async function getRequest(requestId: string): Promise<GenApiRequest> {
   return res.data;
 }
 
-// Extract image URL from a completed text-to-image request
-export function extractImageUrl(output: GenApiRequest["output"]): string | undefined {
+// Extract the first HTTP URL from whatever shape the output is
+function firstUrl(output: GenApiRequest["output"]): string | undefined {
   if (!output) return undefined;
   if (typeof output === "string" && output.startsWith("http")) return output;
   if (Array.isArray(output)) {
@@ -92,25 +67,20 @@ export function extractImageUrl(output: GenApiRequest["output"]): string | undef
   return undefined;
 }
 
-// Extract GLB URL from a completed Hunyuan 3D request
 export function extractGlbUrl(output: GenApiRequest["output"]): string | undefined {
   if (!output) return undefined;
-  if (typeof output === "string" && (output.includes(".glb") || output.startsWith("http"))) return output;
-  if (Array.isArray(output)) {
-    for (const v of output) {
-      if (typeof v === "string" && (v.includes(".glb") || v.startsWith("http"))) return v;
-    }
-  }
   if (typeof output === "object" && !Array.isArray(output)) {
     const obj = output as Record<string, unknown>;
     for (const key of ["glb", "model", "model_url", "output"]) {
       if (typeof obj[key] === "string") return obj[key] as string;
     }
-    for (const v of Object.values(obj)) {
-      if (typeof v === "string" && v.startsWith("http")) return v;
+  }
+  if (Array.isArray(output)) {
+    for (const v of output) {
+      if (typeof v === "string" && (v.includes(".glb") || v.startsWith("http"))) return v;
     }
   }
-  return undefined;
+  return firstUrl(output);
 }
 
 export function extractThumbnailUrl(output: GenApiRequest["output"]): string | undefined {
