@@ -2,9 +2,16 @@ import axios from "axios";
 
 const GENAPI_BASE = "https://api.gen-api.ru/api/v1";
 
+function getApiKey(): string {
+  const raw = process.env.MESHY_API_KEY ?? "";
+  // Strip any accidental prefix like "api_key = sk-..." or "Bearer sk-..."
+  const match = raw.match(/sk-[A-Za-z0-9]+/);
+  return match ? match[0] : raw.trim();
+}
+
 function headers() {
   return {
-    Authorization: `Bearer ${process.env.MESHY_API_KEY}`,
+    Authorization: `Bearer ${getApiKey()}`,
     "Content-Type": "application/json",
   };
 }
