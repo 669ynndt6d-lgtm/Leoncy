@@ -3,6 +3,7 @@ import type { BotContext, SessionData } from "./context.js";
 import { registerStartHandlers } from "./handlers/start.js";
 import { registerMenuHandlers } from "./handlers/menu.js";
 import { registerGenerationHandlers } from "./handlers/generation.js";
+import { registerPaymentHandlers } from "./handlers/payment.js";
 import { mainMenuKeyboard } from "./keyboards.js";
 import { logger } from "../lib/logger.js";
 
@@ -30,6 +31,7 @@ export function createBot(): Bot<BotContext> {
   registerStartHandlers(bot);
   registerMenuHandlers(bot);
   registerGenerationHandlers(bot);
+  registerPaymentHandlers(bot);
 
   // Fallback for unhandled text (not in a specific step)
   bot.on("message:text", async (ctx) => {

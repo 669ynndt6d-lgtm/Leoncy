@@ -4,7 +4,6 @@ const GENAPI_BASE = "https://api.gen-api.ru/api/v1";
 
 function getApiKey(): string {
   const raw = process.env.MESHY_API_KEY ?? "";
-  // Strip any accidental prefix like "api_key = sk-..." or "Bearer sk-..."
   const match = raw.match(/sk-[A-Za-z0-9]+/);
   return match ? match[0] : raw.trim();
 }
@@ -21,31 +20,22 @@ export type GenApiStatus = "queued" | "processing" | "completed" | "failed" | "e
 export interface GenApiRequest {
   id: string;
   status: GenApiStatus;
-  output?: Record<string, unknown>;
+  output?: Record<string, unknown> | string[] | string;
   error?: string;
   progress?: number;
 }
 
-// Create a text-to-3D request via GenAPI Hunyuan 3D
-export async function createTextTo3D(
-  prompt: string,
-): Promise<string> {
+// Step 1 for text-to-3D: generate a 2D image from text using Flux
+export async function generateImageFromText(prompt: string): Promise<string> {
   const res = await axios.post<{ id: string; status: string }>(
-    `${GENAPI_BASE}/networks/hunyuan-3d`,
+    `${GENAPI_BASE}/networks/flux-1-schnell`,
     {
       input: {
-        prompt,
-        steps: 50,
-        guidance_scale: 7.5,
-        octree_resolution: 256,
-        num_chunks: 8000,
-        randomize_seed: true,
-        seed: 0,
-        remove_background: true,
-        foreground_ratio: 0.85,
-        mc_algo: "mc",
-        export_format: "glb",
-        geometry_type: "birefnet",
+        prompt: `${prompt}, high quality, white background, centered, 3D product render style`,
+        width: 1024,
+        height: 1024,
+        num_inference_steps: 4,
+        guidance_scale: 3.5,
       },
     },
     { headers: headers() },
@@ -53,15 +43,13 @@ export async function createTextTo3D(
   return res.data.id;
 }
 
-// Create an image-to-3D request via GenAPI Hunyuan 3D
-export async function createImageTo3D(
-  imageUrl: string,
-): Promise<string> {
+// Step 2 for text-to-3D (and only step for image-to-3D): Hunyuan 3D
+export async function createHunyuan3D(imageUrl: string): Promise<string> {
   const res = await axios.post<{ id: string; status: string }>(
     `${GENAPI_BASE}/networks/hunyuan-3d`,
     {
       input: {
-        image: imageUrl,
+        input_image_url: imageUrl,
         steps: 50,
         octree_resolution: 256,
         num_chunks: 8000,
@@ -71,7 +59,6 @@ export async function createImageTo3D(
         foreground_ratio: 0.85,
         mc_algo: "mc",
         export_format: "glb",
-        geometry_type: "birefnet",
       },
     },
     { headers: headers() },
@@ -79,7 +66,7 @@ export async function createImageTo3D(
   return res.data.id;
 }
 
-// Poll request status
+// Poll any GenAPI request
 export async function getRequest(requestId: string): Promise<GenApiRequest> {
   const res = await axios.get<GenApiRequest>(
     `${GENAPI_BASE}/requests/${requestId}`,
@@ -88,25 +75,49 @@ export async function getRequest(requestId: string): Promise<GenApiRequest> {
   return res.data;
 }
 
-// Extract the GLB URL from a completed request output
-export function extractGlbUrl(output: Record<string, unknown>): string | undefined {
-  // GenAPI Hunyuan 3D typically returns output.glb or output[0] or similar
-  if (typeof output.glb === "string") return output.glb;
-  if (typeof output.model === "string") return output.model;
-  if (typeof output.model_url === "string") return output.model_url;
-  if (Array.isArray(output) && typeof output[0] === "string") return output[0];
-  // Try to find any string value that looks like a URL
-  for (const val of Object.values(output)) {
-    if (typeof val === "string" && (val.startsWith("http") || val.includes(".glb"))) {
-      return val;
+// Extract image URL from a completed text-to-image request
+export function extractImageUrl(output: GenApiRequest["output"]): string | undefined {
+  if (!output) return undefined;
+  if (typeof output === "string" && output.startsWith("http")) return output;
+  if (Array.isArray(output)) {
+    for (const v of output) {
+      if (typeof v === "string" && v.startsWith("http")) return v;
+    }
+  }
+  if (typeof output === "object" && !Array.isArray(output)) {
+    for (const v of Object.values(output)) {
+      if (typeof v === "string" && v.startsWith("http")) return v;
     }
   }
   return undefined;
 }
 
-export function extractThumbnailUrl(output: Record<string, unknown>): string | undefined {
-  if (typeof output.thumbnail === "string") return output.thumbnail;
-  if (typeof output.preview === "string") return output.preview;
-  if (typeof output.image === "string") return output.image;
+// Extract GLB URL from a completed Hunyuan 3D request
+export function extractGlbUrl(output: GenApiRequest["output"]): string | undefined {
+  if (!output) return undefined;
+  if (typeof output === "string" && (output.includes(".glb") || output.startsWith("http"))) return output;
+  if (Array.isArray(output)) {
+    for (const v of output) {
+      if (typeof v === "string" && (v.includes(".glb") || v.startsWith("http"))) return v;
+    }
+  }
+  if (typeof output === "object" && !Array.isArray(output)) {
+    const obj = output as Record<string, unknown>;
+    for (const key of ["glb", "model", "model_url", "output"]) {
+      if (typeof obj[key] === "string") return obj[key] as string;
+    }
+    for (const v of Object.values(obj)) {
+      if (typeof v === "string" && v.startsWith("http")) return v;
+    }
+  }
+  return undefined;
+}
+
+export function extractThumbnailUrl(output: GenApiRequest["output"]): string | undefined {
+  if (!output || typeof output !== "object" || Array.isArray(output)) return undefined;
+  const obj = output as Record<string, unknown>;
+  for (const key of ["thumbnail", "preview", "image"]) {
+    if (typeof obj[key] === "string") return obj[key] as string;
+  }
   return undefined;
 }

@@ -11,6 +11,7 @@ export const usersTable = pgTable("users", {
   languageCode: text("language_code").default("en"),
   defaultQuality: text("default_quality").default("standard"),
   isPremium: boolean("is_premium").default(false),
+  premiumUntil: timestamp("premium_until"),
   generationsUsed: integer("generations_used").default(0),
   generationsLimit: integer("generations_limit").default(10),
   createdAt: timestamp("created_at").defaultNow().notNull(),

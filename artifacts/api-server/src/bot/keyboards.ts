@@ -6,7 +6,7 @@ export function mainMenuKeyboard() {
     .text("🖼 Создать из фото", "menu_image").row()
     .text("📂 История моделей", "menu_history").row()
     .text("⚙ Настройки качества", "menu_quality").row()
-    .text("👤 Профиль", "menu_profile");
+    .text("👤 Профиль", "menu_profile").text("⭐ Premium", "menu_premium");
 }
 
 export function qualityKeyboard(prefix: string = "quality") {
