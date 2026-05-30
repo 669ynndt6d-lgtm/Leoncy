@@ -1,0 +1,15 @@
+# Railway deployment settings
+# Leave project ID blank until Railway initializes it locally.
+environment = "production"
+
+[build]
+  command = "pnpm install --frozen-lockfile"
+
+[deploy]
+  command = "pnpm start"
+
+[services]
+  [services.web]
+    name = "web"
+    path = "."
+    start = "pnpm start"

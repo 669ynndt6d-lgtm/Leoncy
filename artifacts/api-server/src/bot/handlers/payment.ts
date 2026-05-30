@@ -57,7 +57,6 @@ export function registerPaymentHandlers(bot: Bot<BotContext>) {
         "⭐ Premium — 3D Bot",
         `Premium-подписка на 30 дней: 100 генераций, Ultra HD качество, приоритетная очередь.`,
         "premium_30days",
-        "", // empty provider_token = Telegram Stars
         "XTR",
         [{ label: "Premium 30 дней", amount: PREMIUM_STARS_PRICE }],
         {

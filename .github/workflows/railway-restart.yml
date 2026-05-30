@@ -1,0 +1,36 @@
+name: Restart Railway Service
+
+on:
+  workflow_dispatch:
+
+jobs:
+  restart:
+    runs-on: ubuntu-latest
+    env:
+      RAILWAY_API_KEY: ${{ secrets.RAILWAY_API_KEY }}
+      RAILWAY_PROJECT_ID: ${{ secrets.RAILWAY_PROJECT_ID }}
+      RAILWAY_ENVIRONMENT: ${{ secrets.RAILWAY_ENVIRONMENT }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'pnpm'
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v2
+        with:
+          version: 9
+
+      - name: Install Railway CLI
+        run: pnpm exec @railway/cli --version
+
+      - name: Restart Railway service
+        run: |
+          TARGET_ENV="${RAILWAY_ENVIRONMENT:-production}"
+          pnpm exec @railway/cli login --apiKey "$RAILWAY_API_KEY"
+          pnpm exec @railway/cli restart --project "$RAILWAY_PROJECT_ID" --environment "$TARGET_ENV"
